@@ -106,7 +106,7 @@ def main() -> None:
         w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR); w.writeframes(pcm.tobytes())
 
     # 자막: make_voice.py 의 대본을 문장 단위로 쪼개 글자 수에 비례해 시간을 나눈다
-    ns: dict = {}
+    ns: dict = {"__file__": str(HERE / "make_voice.py"), "__name__": "_subtitle_script"}
     src = (HERE / "make_voice.py").read_text(encoding="utf-8")
     exec(src.split("def tts")[0], ns)  # noqa: S102 — 이 폴더의 대본만 읽는다
     lines, k = [], 1

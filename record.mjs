@@ -16,8 +16,14 @@ const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] :
 const OUT = resolve(args[0] && !args[0].startsWith("--") ? args[0] : join(HERE, "video_noaudio.mp4"));
 const W = +opt("--w", 3840), H = +opt("--h", 2160), FPS = 60, MAXF = +opt("--frames", 0), FROM = +opt("--from-step", 0), TO = opt("--to-step", null);
 
+if (![W, H].every(v => Number.isInteger(v) && v > 0 && v % 2 === 0) ||
+    !Number.isInteger(MAXF) || MAXF < 0 || !Number.isInteger(FROM) || FROM < 0 ||
+    (TO !== null && (!Number.isInteger(+TO) || +TO <= FROM))) {
+  throw new Error("잘못된 녹화 범위 또는 크기 (너비와 높이는 양의 짝수)");
+}
 // ── 크롬 (헤드리스, GPU)
 const CH = ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"].find(p => existsSync(p));
+if (!CH) throw new Error("Chrome 실행 파일을 찾을 수 없습니다.");
 const port = 9400 + Math.floor(Math.random() * 400);
 const prof = mkdtempSync(join(tmpdir(), "rec-"));
 const ch = spawn(CH, ["--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${prof}`, "--use-angle=d3d11", "--ignore-gpu-blocklist",
@@ -28,7 +34,8 @@ for (let i = 0; i < 80 && !ws; i++) {
   try { const j = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(); const pg = j.find(x => x.type === "page"); if (pg) { ws = new WebSocket(pg.webSocketDebuggerUrl); break; } } catch {}
   await sleep(200);
 }
-await new Promise(r => ws.onopen = r);   // 만든 직후 같은 틱에 걸어야 open 을 놓치지 않는다
+if (!ws) { ch.kill(); throw new Error("Chrome 디버깅 연결 실패"); }
+await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });   // 만든 직후 같은 틱에 걸어야 open 을 놓치지 않는다
 // 크롬이 죽거나 멈추면 응답이 오지 않는다 → 60초 넘게 기다리면 오류로 끝낸다 (조용히 멈춰 있지 않도록)
 const send = (method, params = {}) => new Promise(r => {
   const i = ++id;
@@ -59,6 +66,9 @@ mp3.forEach((f, i) => {
   steps.push({ step: i, start: +t.toFixed(3), voice: +(t + lead).toFixed(3), voiceLen: a, hold, len: +len.toFixed(3) });
   t += len;
 });
+if (!steps.length || FROM >= steps.length || (TO !== null && +TO > steps.length)) {
+  ch.kill(); throw new Error("녹화할 단계가 없거나 범위를 벗어났습니다.");
+}
 const TOTAL = t;
 writeFileSync(join(HERE, "timeline.json"), JSON.stringify({ fps: FPS, total: TOTAL, steps }, null, 1));
 console.log(`길이 ${TOTAL.toFixed(1)}초 · ${Math.round(TOTAL * FPS)}장 · ${W}x${H}`);
@@ -66,7 +76,16 @@ console.log(`길이 ${TOTAL.toFixed(1)}초 · ${Math.round(TOTAL * FPS)}장 · $
 // ── ffmpeg (JPEG 를 받아 H.264)
 const ff = spawn("ffmpeg", ["-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", String(FPS), "-c:v", "mjpeg", "-i", "-",
   "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p", "-movflags", "+faststart", OUT], { stdio: ["pipe", "inherit", "inherit"] });
-const write = buf => new Promise(r => ff.stdin.write(buf) ? r() : ff.stdin.once("drain", r));
+let ffError = null;
+const ffDone = new Promise(resolve => {
+  ff.on("error", error => { ffError = error; resolve(-1); });
+  ff.on("close", resolve);
+});
+ff.stdin.on("error", error => { ffError = error; });
+const write = buf => new Promise((resolve, reject) => {
+  if (ffError) return reject(ffError);
+  ff.stdin.write(buf, error => error ? reject(error) : resolve());
+});
 
 const N = MAXF || (TO !== null && +TO < steps.length ? Math.round(steps[+TO].start * FPS) : Math.round(TOTAL * FPS));
 await ev("REC.intro()");
@@ -87,7 +106,11 @@ for (let f = F0; f < N; f++) {
   if (f % 300 === 0) { const el = (Date.now() - t0) / 1000, rate = (f + 1) / el; console.log(`${f}/${N} 장 · 단계 ${si} · ${rate.toFixed(2)} 장/초 · 남은 시간 약 ${((N - f) / rate / 60).toFixed(1)}분`); }
 }
 ff.stdin.end();
-await new Promise(r => ff.on("close", r));
+const ffCode = await ffDone;
 ch.kill();
+if (ffError || ffCode !== 0) {
+  console.error("ffmpeg 녹화 실패:", ffError?.message || `종료 코드 ${ffCode}`);
+  process.exit(1);
+}
 console.log("완료:", OUT, `(${((Date.now() - t0) / 60000).toFixed(1)}분)`);
 process.exit(0);
